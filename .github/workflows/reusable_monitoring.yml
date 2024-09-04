@@ -34,6 +34,13 @@ on:
         description: 'multiline yaml of certificate subjects and issuers, key subjects, and fingerprints. For certificates, if no issuers are specified, match any OIDC provider'
         required: false
         type: string
+    outputs:
+      is-identity-found:
+        description: 'Whether the monitored identities were found. Valid values are "true" or "false"'
+        value: ${{ jobs.monitor.outputs.is-identity-found || 'false' }}
+      found-identity-list:
+        description: 'Multi-line string containing the list of found identities'
+        value: ${{ jobs.monitor.outputs.found-identity-list || '' }}
 
 permissions:
   contents: read
@@ -41,6 +48,8 @@ permissions:
 env:
   UPLOADED_LOG_NAME: checkpoint
   LOG_FILE: checkpoint_log.txt
+  OUTPUT_IDENTITIED_ARTIFACT_NAME: identities
+  OUTPUT_IDENTITIED_FILE: identities.txt
 
 jobs:
   detect-workflow:
@@ -58,6 +67,9 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     needs: [detect-workflow]
+    outputs:
+      is-identity-found: ${{ steps.check-if-identity-found.outputs.is-identity-found }}
+      found-identity-list: ${{ steps.check-if-identity-found.outputs.found-identity-list }}
     steps:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
@@ -76,7 +88,8 @@ jobs:
         run: cat ${{ env.LOG_FILE }}
         # Skip on first run
         continue-on-error: true
-      - run: go run ./cmd/verifier --file ${{ env.LOG_FILE }} --once --monitored-values "${{ inputs.identities }}" --user-agent "${{ format('{0}/{1}/{2}', needs.detect-workflow.outputs.repository, needs.detect-workflow.outputs.ref, github.run_id) }}"
+      - run: go run ./cmd/verifier --file ${{ env.LOG_FILE }} --once --monitored-values "${{ inputs.identities }}" --user-agent "${{ format('{0}/{1}/{2}', needs.detect-workflow.outputs.repository, needs.detect-workflow.outputs.ref, github.run_id) }}" --output-identities "${{ env.OUTPUT_IDENTITIED_FILE }}"
+
       - name: Upload checkpoint
         uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
@@ -85,6 +98,35 @@ jobs:
           retention-days: ${{ inputs.artifact_retention_days }}
       - name: Log new checkpoints
         run: cat ${{ env.LOG_FILE }}
+
+      - name: Check if identity found
+        id: check-if-identity-found
+        run: |
+          if [[ ! -f "${{ env.OUTPUT_IDENTITIED_FILE }}" ]]; then # identity output file not found
+            echo "is-identity-found=false" >> "$GITHUB_OUTPUT"
+            echo "Identity output file not found"
+            exit 0
+          fi
+
+          IDENTITY_FOUND_COUNT=$(cat ${{ env.OUTPUT_IDENTITIED_FILE }} | sed '/^\s*$/d' | wc -l) # Count non-empty lines
+          echo "Identity found count: ${IDENTITY_FOUND_COUNT}"
+
+          if (( ${IDENTITY_FOUND_COUNT} > 0 )); then
+            echo "is-identity-found=true" >> "$GITHUB_OUTPUT"
+
+            # Set identity found content as step output
+            FOUND_IDENTITY_LIST=$(cat ${{ env.OUTPUT_IDENTITIED_FILE }})
+            echo "found-identity-list<<EOF" >> "$GITHUB_OUTPUT"
+            echo "${FOUND_IDENTITY_LIST}" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+
+            echo "Identity found"
+          else
+            echo "is-identity-found=false" >> "$GITHUB_OUTPUT"
+            echo "Identity not found"
+          fi
+
+          exit 0
 
   if-succeeded:
     runs-on: ubuntu-latest
